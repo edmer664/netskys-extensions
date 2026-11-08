@@ -1635,8 +1635,18 @@ var _Sources = (() => {
     }
     return new Uint8Array(output);
   }
+  function bytesToUtf8(bytes) {
+    let encoded = "";
+    for (let i = 0; i < bytes.length; i++) {
+      const byte = bytes[i];
+      if (byte !== void 0) {
+        encoded += "%" + ("00" + byte.toString(16)).slice(-2);
+      }
+    }
+    return decodeURIComponent(encoded);
+  }
   var MangahubInfo = {
-    version: "3.1.3",
+    version: "3.1.4",
     name: "Mangahub",
     icon: "icon.png",
     author: "Netsky",
@@ -1888,7 +1898,7 @@ Please go to the homepage of <${_Mangahub.name}> and press the cloud icon.`);
       combined.set(authTagBytes, cipherBytes.length);
       const cipher = gcm(keyBytes, ivBytes);
       const decryptedBytes = cipher.decrypt(combined);
-      return new TextDecoder().decode(decryptedBytes);
+      return bytesToUtf8(decryptedBytes);
     }
     async getSearchTags() {
       const request = App.createRequest({
