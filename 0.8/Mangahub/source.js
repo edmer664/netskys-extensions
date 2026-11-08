@@ -1610,7 +1610,7 @@ var _Sources = (() => {
 
   // src/Mangahub/Mangahub.ts
   var MH_DOMAIN = "https://mangahub.io";
-  var MH_API_DOMAIN = "https://api.mghcdn.com/graphql";
+  var MH_API_DOMAIN = `${MH_DOMAIN}/graphql`;
   var MH_CDN_DOMAIN = "https://imgx.mghcdn.com";
   function base64UrlToBytes(str) {
     let base64 = str.replace(/-/g, "+").replace(/_/g, "/");
@@ -1636,7 +1636,7 @@ var _Sources = (() => {
     return new Uint8Array(output);
   }
   var MangahubInfo = {
-    version: "3.1.2",
+    version: "3.1.3",
     name: "Mangahub",
     icon: "icon.png",
     author: "Netsky",
@@ -1659,13 +1659,14 @@ var _Sources = (() => {
         requestTimeout: 15e3,
         interceptor: {
           interceptRequest: async (request) => {
+            const mhubAccess = await this.getMhubAccess();
             request.headers = {
               ...request.headers ?? {},
               ...{
-                "Referer": `${MH_DOMAIN}/`,
+                "Referer": request.headers?.["Referer"] ?? `${MH_DOMAIN}/`,
                 "Origin": `${MH_DOMAIN}`,
                 "User-Agent": await this.requestManager.getDefaultUserAgent(),
-                "x-mhub-access": await this.getMhubAccess()
+                ...mhubAccess ? { "x-mhub-access": mhubAccess } : {}
               }
             };
             return request;
@@ -1770,25 +1771,32 @@ Please go to the homepage of <${_Mangahub.name}> and press the cloud icon.`);
       return parseChapters(data.data.manga.chapters, mangaId);
     }
     async getChapterDetails(mangaId, chapterId) {
-      const request = App.createRequest({
-        url: MH_API_DOMAIN,
-        method: "POST",
-        headers: {
-          "Accept": "application/json",
-          "Content-Type": "application/json"
-        },
-        data: {
-          query: `query {
-                    chapter(x: m01, slug: "${mangaId}", number: ${Number(chapterId)}) {
-                      pages
-                      title
-                      slug
-                    }
-                  }
-                  `
-        }
-      });
-      const response = await this.requestManager.schedule(request, 1);
+      if (!await this.getMhubAccess()) {
+        await this.refreshAPIKey(mangaId, chapterId);
+      }
+      const createChapterRequest = async () => {
+        const mhubAccess = await this.getMhubAccess();
+        return App.createRequest({
+          url: MH_API_DOMAIN,
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            ...mhubAccess ? { "x-mhub-access": mhubAccess, "Cookie": `mhub_access=${mhubAccess};` } : {}
+          },
+          data: {
+            query: `query {
+                        chapter(x: m01, slug: "${mangaId}", number: ${Number(chapterId)}) {
+                          pages
+                          title
+                          slug
+                        }
+                      }
+                      `
+          }
+        });
+      };
+      let response = await this.requestManager.schedule(await createChapterRequest(), 1);
       this.CloudFlareError(response.status);
       let data;
       try {
@@ -1797,8 +1805,17 @@ Please go to the homepage of <${_Mangahub.name}> and press the cloud icon.`);
         console.log(`${e}`);
       }
       if (data?.errors) {
-        await this.refreshAPIKey();
-        throw new Error("API LIMIT EXCEEDED!\nTry doing to CloudFlare again bypass or come back later!");
+        await this.refreshAPIKey(mangaId, chapterId);
+        response = await this.requestManager.schedule(await createChapterRequest(), 1);
+        this.CloudFlareError(response.status);
+        try {
+          data = JSON.parse(response.data);
+        } catch (e) {
+          console.log(`${e}`);
+        }
+        if (data?.errors) {
+          throw new Error("API LIMIT EXCEEDED!\nTry doing to CloudFlare again bypass or come back later!");
+        }
       }
       if (!data.data?.chapter?.pages) throw new Error(`Failed to parse chapter or pages property from data object mangaId:${mangaId} chapterId:${chapterId}`);
       let pagesString = data.data.chapter.pages;
@@ -1831,6 +1848,7 @@ Please go to the homepage of <${_Mangahub.name}> and press the cloud icon.`);
       });
     }
     async decryptPages(pages) {
+      const mhubAccess = await this.getMhubAccess();
       const request = App.createRequest({
         url: `${MH_DOMAIN}/api/chapter-crypto`,
         method: "GET",
@@ -1838,7 +1856,7 @@ Please go to the homepage of <${_Mangahub.name}> and press the cloud icon.`);
           "Accept": "application/json",
           "Referer": `${MH_DOMAIN}/`,
           "User-Agent": await this.requestManager.getDefaultUserAgent(),
-          "x-mhub-access": await this.getMhubAccess()
+          ...mhubAccess ? { "x-mhub-access": mhubAccess, "Cookie": `mhub_access=${mhubAccess};` } : {}
         }
       });
       const response = await this.requestManager.schedule(request, 1);
@@ -2119,7 +2137,7 @@ Please go to the homepage of <${_Mangahub.name}> and press the cloud icon.`);
     async getCloudflareBypassRequestAsync() {
       await this.stateManager.store("userAgent", "null");
       return App.createRequest({
-        url: `${MH_DOMAIN}/`,
+        url: `${MH_DOMAIN}/chapter/the-last-human/chapter-1?reloadKey=1`,
         method: "GET",
         headers: {
           "Referer": `${MH_DOMAIN}/`,
@@ -2127,29 +2145,37 @@ Please go to the homepage of <${_Mangahub.name}> and press the cloud icon.`);
         }
       });
     }
-    async refreshAPIKey() {
+    async refreshAPIKey(mangaId = "the-last-human", chapterId = "1") {
       const currentKey = await this.getMhubAccess();
       await this.stateManager.store("mhub_key", "");
       this.requestManager?.cookieStore?.getAllCookies().forEach((x) => {
-        this.requestManager?.cookieStore?.removeCookie(x);
+        if (x.name === "mhub_access") {
+          this.requestManager?.cookieStore?.removeCookie(x);
+        }
       });
       const request = App.createRequest({
-        url: `${MH_DOMAIN}/`,
+        url: `${MH_DOMAIN}/chapter/${mangaId}/chapter-${chapterId}?reloadKey=1`,
         method: "GET",
         headers: {
-          "Referer": `${MH_DOMAIN}/`,
+          "Referer": `${MH_DOMAIN}/manga/${mangaId}`,
           "User-Agent": await this.requestManager.getDefaultUserAgent(),
-          "Cookie": currentKey ? `mhub_access=${currentKey};` : ""
+          ...currentKey ? { "Cookie": `mhub_access=${currentKey};` } : {}
         }
       });
       const response = await this.requestManager.schedule(request, 1);
       this.CloudFlareError(response.status);
-      const cookieHeaders = response.headers["Set-Cookie"];
+      const cookieHeaders = response.headers["Set-Cookie"] ?? response.headers["set-cookie"];
       let mhub_key = "";
       if (cookieHeaders) {
         const match = /mhub_access=([^;]+)/.exec(cookieHeaders);
         if (match) {
           mhub_key = match[1] ?? "";
+        }
+      }
+      if (!mhub_key) {
+        const cookie = this.requestManager?.cookieStore?.getAllCookies().find((x) => x.name === "mhub_access");
+        if (cookie?.value) {
+          mhub_key = cookie.value;
         }
       }
       if (mhub_key) {
